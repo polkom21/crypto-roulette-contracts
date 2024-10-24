@@ -2,71 +2,27 @@
 pragma solidity ^0.8.27;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {LinkTokenInterface} from "@chainlink/contracts/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
-import {VRFV2PlusWrapperConsumerBase} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFV2PlusWrapperConsumerBase.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import {IVRFV2PlusWrapper} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFV2PlusWrapper.sol";
 
-contract Roulette is Initializable, VRFV2PlusWrapperConsumerBase {
+contract Roulette is Initializable, OwnableUpgradeable {
+    error OnlyVRFWrapperCanFulfill(address have, address want);
+
+    LinkTokenInterface internal i_linkToken;
+    IVRFV2PlusWrapper public i_vrfV2PlusWrapper;
+
     IERC20 public token;
+    uint8 public feeBps;
 
-    uint8[3][] public streets = [
-        [1, 2, 3],
-        [4, 5, 6],
-        [7, 8, 9],
-        [10, 11, 12],
-        [13, 14, 15],
-        [16, 17, 18],
-        [19, 20, 21],
-        [22, 23, 24],
-        [25, 26, 27],
-        [28, 29, 30],
-        [31, 32, 33],
-        [34, 35, 36]
-    ];
+    uint8[3][] public streets;
 
-    uint8[18] public red = [
-        1,
-        3,
-        5,
-        7,
-        9,
-        12,
-        14,
-        16,
-        18,
-        19,
-        21,
-        23,
-        25,
-        27,
-        30,
-        32,
-        34,
-        36
-    ];
+    uint8[18] public red;
 
-    uint8[18] public black = [
-        2,
-        4,
-        6,
-        8,
-        10,
-        11,
-        13,
-        15,
-        17,
-        20,
-        22,
-        24,
-        26,
-        28,
-        29,
-        31,
-        33,
-        35
-    ];
+    uint8[18] public black;
 
     enum BetType {
         ZERO, // 0
@@ -99,22 +55,101 @@ contract Roulette is Initializable, VRFV2PlusWrapperConsumerBase {
     }
 
     event BetsCreated(uint256 requestId, uint256 feePrice);
+    event FeeCharge(uint256 amount);
     event BetsResult(uint256 requestId, uint8 result, uint256[] winnings);
+    event FeeWithdrawn(address by, uint256 amount);
+    event EmergencyWithdrawn(address by, address token, uint256 amount);
+    event FeeChanged(uint8 newFeeBps);
 
     // requestId => bets
     mapping(uint256 => Bet[]) public bets;
     // requestId => owner
-    mapping(uint256 => address) betsOwner;
+    mapping(uint256 => address) public betsOwner;
+    // requestId => bool
+    mapping(uint256 => bool) public fulfilled;
+
+    uint256 public feeAmount;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor()
-        VRFV2PlusWrapperConsumerBase(0x6e6c366a1cd1F92ba87Fd6f96F743B0e6c967Bf0) // Amoy wrapper
-    {
+    constructor() {
         _disableInitializers();
     }
 
-    function initialize(IERC20 _token) public initializer {
+    function initialize(
+        IERC20 _token,
+        address _vrfV2PlusWrapper
+    ) public initializer {
+        _init(_token, _vrfV2PlusWrapper);
+    }
+
+    function _init(IERC20 _token, address _vrfV2PlusWrapper) internal {
         token = _token;
+        IVRFV2PlusWrapper vrfV2PlusWrapper = IVRFV2PlusWrapper(
+            _vrfV2PlusWrapper
+        );
+        feeAmount = 0;
+        feeBps = 0;
+
+        i_linkToken = LinkTokenInterface(vrfV2PlusWrapper.link());
+        i_vrfV2PlusWrapper = vrfV2PlusWrapper;
+        __Ownable_init(msg.sender);
+
+        streets = [
+            [1, 2, 3],
+            [4, 5, 6],
+            [7, 8, 9],
+            [10, 11, 12],
+            [13, 14, 15],
+            [16, 17, 18],
+            [19, 20, 21],
+            [22, 23, 24],
+            [25, 26, 27],
+            [28, 29, 30],
+            [31, 32, 33],
+            [34, 35, 36]
+        ];
+
+        red = [
+            1,
+            3,
+            5,
+            7,
+            9,
+            12,
+            14,
+            16,
+            18,
+            19,
+            21,
+            23,
+            25,
+            27,
+            30,
+            32,
+            34,
+            36
+        ];
+
+        black = [
+            2,
+            4,
+            6,
+            8,
+            10,
+            11,
+            13,
+            15,
+            17,
+            20,
+            22,
+            24,
+            26,
+            28,
+            29,
+            31,
+            33,
+            35
+        ];
     }
 
     function isStreetBet(
@@ -439,13 +474,22 @@ contract Roulette is Initializable, VRFV2PlusWrapperConsumerBase {
     function newBet(Bet[] calldata _bets) external returns (uint256) {
         uint256 totalAmount = 0;
         for (uint256 i = 0; i < _bets.length; i++) {
-            if (_bets[i].betType == BetType.ZERO) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.DOUBLE_ZERO) {
+            if (
+                _bets[i].betType == BetType.ZERO ||
+                _bets[i].betType == BetType.DOUBLE_ZERO ||
+                _bets[i].betType == BetType.FIRST_COLUMN ||
+                _bets[i].betType == BetType.SECOND_COLUMN ||
+                _bets[i].betType == BetType.THIRD_COLUMN ||
+                _bets[i].betType == BetType.FIRST_DOZEN ||
+                _bets[i].betType == BetType.SECOND_DOZEN ||
+                _bets[i].betType == BetType.THIRD_DOZEN ||
+                _bets[i].betType == BetType.ONE_TO_EIGHTEEN ||
+                _bets[i].betType == BetType.NINETEEN_TO_THIRTY_SIX ||
+                _bets[i].betType == BetType.EVEN ||
+                _bets[i].betType == BetType.ODD ||
+                _bets[i].betType == BetType.RED ||
+                _bets[i].betType == BetType.BLACK
+            ) {
                 require(
                     _bets[i].numbers.length == 0,
                     "Numbers not required for this type"
@@ -498,81 +542,16 @@ contract Roulette is Initializable, VRFV2PlusWrapperConsumerBase {
             if (_bets[i].betType == BetType.STRAIGHT_UP) {
                 require(_bets[i].numbers.length == 1, "Invalid numbers length");
             }
-            if (_bets[i].betType == BetType.FIRST_COLUMN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.SECOND_COLUMN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.THIRD_COLUMN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.FIRST_DOZEN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.SECOND_DOZEN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.THIRD_DOZEN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.ONE_TO_EIGHTEEN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.NINETEEN_TO_THIRTY_SIX) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.EVEN) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.ODD) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.RED) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
-            if (_bets[i].betType == BetType.BLACK) {
-                require(
-                    _bets[i].numbers.length == 0,
-                    "Numbers not required for this type"
-                );
-            }
 
             totalAmount += _bets[i].amount;
         }
+        uint256 betFee = (totalAmount * feeBps) / 10000;
+        feeAmount += betFee;
+
+        require(
+            token.balanceOf(address(this)) - feeAmount >= totalAmount * 36,
+            "Too high sum of bids to withdraw rewards"
+        );
 
         token.transferFrom(msg.sender, address(this), totalAmount);
 
@@ -593,16 +572,19 @@ contract Roulette is Initializable, VRFV2PlusWrapperConsumerBase {
         }
         betsOwner[requestId] = msg.sender;
         emit BetsCreated(requestId, reqPrice);
+        emit FeeCharge(betFee);
         return requestId;
     }
 
     function fulfillRandomWords(
         uint256 _requestId,
         uint256[] memory _randomWords
-    ) internal override {
+    ) internal {
+        require(!fulfilled[_requestId], "Already filled");
         // Convert random word to a number between 0 and 37 - from 0 to 36 and 37 for double zero
         uint8 winNumber = uint8(_randomWords[0] % 38);
 
+        fulfilled[_requestId] = true;
         uint256 rewards = 0;
         for (uint256 i = 0; i < bets[_requestId].length; i++) {
             rewards += getWinValue(bets[_requestId][i], winNumber);
@@ -612,4 +594,108 @@ contract Roulette is Initializable, VRFV2PlusWrapperConsumerBase {
             token.transfer(betsOwner[_requestId], rewards);
         }
     }
+
+    fallback() external payable {}
+
+    function withdrawFunds(address _token, uint256 _amount) external onlyOwner {
+        emit EmergencyWithdrawn(msg.sender, _token, _amount);
+        if (_token == address(0)) {
+            payable(owner()).transfer(_amount);
+        } else {
+            IERC20(_token).transfer(owner(), _amount);
+        }
+    }
+
+    function withdrawFee() external onlyOwner {
+        uint256 amountToWithdraw = feeAmount;
+        feeAmount = 0;
+        emit FeeWithdrawn(msg.sender, amountToWithdraw);
+        token.transfer(owner(), amountToWithdraw);
+    }
+
+    function changeFeeBps(uint8 _newFeeBps) external onlyOwner {
+        feeBps = _newFeeBps;
+        emit FeeChanged(_newFeeBps);
+    }
+
+    // VRFV2PlusWrapperConsumerBase
+
+    /**
+     * @dev Requests randomness from the VRF V2+ wrapper.
+     *
+     * @param _callbackGasLimit is the gas limit that should be used when calling the consumer's
+     *        fulfillRandomWords function.
+     * @param _requestConfirmations is the number of confirmations to wait before fulfilling the
+     *        request. A higher number of confirmations increases security by reducing the likelihood
+     *        that a chain re-org changes a published randomness outcome.
+     * @param _numWords is the number of random words to request.
+     *
+     * @return requestId is the VRF V2+ request ID of the newly created randomness request.
+     */
+    // solhint-disable-next-line chainlink-solidity/prefix-internal-functions-with-underscore
+    function requestRandomness(
+        uint32 _callbackGasLimit,
+        uint16 _requestConfirmations,
+        uint32 _numWords,
+        bytes memory extraArgs
+    ) internal returns (uint256 requestId, uint256 reqPrice) {
+        reqPrice = i_vrfV2PlusWrapper.calculateRequestPrice(
+            _callbackGasLimit,
+            _numWords
+        );
+        i_linkToken.transferAndCall(
+            address(i_vrfV2PlusWrapper),
+            reqPrice,
+            abi.encode(
+                _callbackGasLimit,
+                _requestConfirmations,
+                _numWords,
+                extraArgs
+            )
+        );
+        return (i_vrfV2PlusWrapper.lastRequestId(), reqPrice);
+    }
+
+    // solhint-disable-next-line chainlink-solidity/prefix-internal-functions-with-underscore
+    function requestRandomnessPayInNative(
+        uint32 _callbackGasLimit,
+        uint16 _requestConfirmations,
+        uint32 _numWords,
+        bytes memory extraArgs
+    ) internal returns (uint256 requestId, uint256 requestPrice) {
+        requestPrice = i_vrfV2PlusWrapper.calculateRequestPriceNative(
+            _callbackGasLimit,
+            _numWords
+        );
+        return (
+            i_vrfV2PlusWrapper.requestRandomWordsInNative{value: requestPrice}(
+                _callbackGasLimit,
+                _requestConfirmations,
+                _numWords,
+                extraArgs
+            ),
+            requestPrice
+        );
+    }
+
+    function rawFulfillRandomWords(
+        uint256 _requestId,
+        uint256[] memory _randomWords
+    ) external {
+        address vrfWrapperAddr = address(i_vrfV2PlusWrapper);
+        if (msg.sender != vrfWrapperAddr) {
+            revert OnlyVRFWrapperCanFulfill(msg.sender, vrfWrapperAddr);
+        }
+        fulfillRandomWords(_requestId, _randomWords);
+    }
+
+    // /// @notice getBalance returns the native balance of the consumer contract
+    // function getBalance() public view returns (uint256) {
+    //     return address(this).balance;
+    // }
+
+    // /// @notice getLinkToken returns the link token contract
+    // function getLinkToken() public view returns (LinkTokenInterface) {
+    //     return i_linkToken;
+    // }
 }
