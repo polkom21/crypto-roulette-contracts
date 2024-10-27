@@ -15,3 +15,9 @@ npx hardhat ignition deploy ./ignition/modules/Lock.ts
 ```shell
 npx hardhat test --network hardhat
 ```
+
+## Deploy to amoy
+
+```shell
+npx hardhat ignition deploy ignition/modules/RouletteModule.ts --parameters ignition/amoy-params.json --network amoy
+```
