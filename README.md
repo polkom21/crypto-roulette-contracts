@@ -20,4 +20,5 @@ npx hardhat test --network hardhat
 
 ```shell
 npx hardhat ignition deploy ignition/modules/RouletteModule.ts --parameters ignition/amoy-params.json --network amoy
+npx hardhat ignition deploy ignition/modules/UpgradeToV0_0_2.ts --parameters ignition/amoy-params.json --network amoy
 ```

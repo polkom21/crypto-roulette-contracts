@@ -2,5 +2,6 @@
   "ProxyModule#Roulette": "0x0893CA47ee3259D6528Acda8aFb6D883588e57ce",
   "ProxyModule#TransparentUpgradeableProxy": "0x54C750f265Dc429D8003eb581bCa5fc956f8128c",
   "ProxyModule#ProxyAdmin": "0xAfe891e817B276e4b2Ed29fBEB68018B07f53E30",
-  "RouletteModule#Roulette": "0x54C750f265Dc429D8003eb581bCa5fc956f8128c"
+  "RouletteModule#Roulette": "0x54C750f265Dc429D8003eb581bCa5fc956f8128c",
+  "UpgradeToV0_0_2#RouletteV0_0_2": "0x8DEb5db3823CB101d7F72c1176fcFb4Fe7e02118"
 }
